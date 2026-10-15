@@ -231,3 +231,87 @@ def punch_out(body: PunchOutIn):
         raise HTTPException(409, "already punched out")
     updated = db.attendance_logs.find_one({"_id": cand["_id"]})
     return serialize_log(updated)
+
+
+class RegularizeIn(BaseModel):
+    model_config = {"extra": "ignore"}
+    status: Literal["PRESENT", "ABSENT", "LEAVE", "WFH", "ON_DUTY"] | None = None
+    punch_in: PunchedAt | None = None
+    punch_out: PunchedAt | None = None
+    reason: str = Field(min_length=5, max_length=200)
+    regularized_by: str = Field(min_length=1, max_length=50)
+
+
+@app.patch("/attendance/{emp_code}/{date}")
+def regularize(emp_code: str, date: str, body: RegularizeIn):
+    emp = db.employees.find_one({"emp_code": emp_code}, {"_id": 0})
+    if not emp:
+        raise HTTPException(404, "unknown employee")
+    rec = db.attendance_logs.find_one({"emp_code": emp_code, "date": date})
+    if not rec:
+        raise HTTPException(404, "no record for that date")
+    new_status = body.status if body.status is not None else rec["status"]
+    new_in_utc = utc_from_ms(body.punch_in) if body.punch_in is not None else rec.get("punch_in")
+    if new_in_utc is not None:
+        new_in_utc = new_in_utc.replace(tzinfo=timezone.utc)
+    new_out_utc = utc_from_ms(body.punch_out) if body.punch_out is not None else rec.get("punch_out")
+    if new_out_utc is not None:
+        new_out_utc = new_out_utc.replace(tzinfo=timezone.utc)
+    if new_status in ("ABSENT", "LEAVE"):
+        if body.punch_in is not None or body.punch_out is not None:
+            raise HTTPException(422, "punch times not allowed with ABSENT/LEAVE")
+        new_in_utc, new_out_utc = None, None
+    else:
+        if new_in_utc is None:
+            raise HTTPException(422, "presence status requires punch_in")
+        if attendance_date_for(new_in_utc, emp["shift_start"], emp["shift_end"]) != date:
+            raise HTTPException(422, "punch_in must stay on the attendance date")
+        if new_out_utc is not None:
+            gap = (new_out_utc - new_in_utc).total_seconds()
+            if gap <= 0 or gap > 24 * 3600:
+                raise HTTPException(422, "punch_out must be after punch_in and within 24 hours")
+    if new_status in ("ABSENT", "LEAVE"):
+        new_late, new_ot, new_wh, new_half = 0, 0, None, False
+    elif new_in_utc is None:
+        new_late, new_ot, new_wh, new_half = 0, 0, None, False
+    else:
+        new_late = compute_late_minutes(new_in_utc, date, emp["shift_start"])
+        if new_out_utc is None:
+            new_ot, new_wh, new_half = 0, None, False
+        else:
+            new_wh = work_hours_half_up(new_in_utc, new_out_utc)
+            new_ot = compute_overtime_minutes(new_out_utc, date, emp["shift_end"], emp["shift_start"])
+            new_half = new_wh < 4.50
+    old = {
+        "status": rec["status"],
+        "punch_in": rec.get("punch_in"),
+        "punch_out": rec.get("punch_out"),
+        "work_hours": rec.get("work_hours"),
+        "late_minutes": rec.get("late_minutes", 0),
+        "overtime_minutes": rec.get("overtime_minutes", 0),
+        "half_day": rec.get("half_day", False),
+    }
+    new = {
+        "status": new_status,
+        "punch_in": new_in_utc,
+        "punch_out": new_out_utc,
+        "work_hours": new_wh,
+        "late_minutes": new_late,
+        "overtime_minutes": new_ot,
+        "half_day": new_half,
+    }
+    changes = {}
+    for k in old:
+        if old[k] != new[k]:
+            changes[k] = {"from": old[k], "to": new[k]}
+    if not changes:
+        raise HTTPException(422, "request changes nothing")
+    now_utc = datetime.now(timezone.utc).replace(microsecond=0)
+    entry = {"at": now_utc, "by": body.regularized_by, "reason": body.reason, "changes": changes}
+    res = db.attendance_logs.update_one(
+        {"_id": rec["_id"], "history": {"$size": len(rec.get("history") or [])}},
+        {"$set": new, "$push": {"history": entry}},
+    )
+    if res.modified_count == 0:
+        raise HTTPException(409, "concurrent edit, retry")
+    return serialize_log(db.attendance_logs.find_one({"_id": rec["_id"]}))
