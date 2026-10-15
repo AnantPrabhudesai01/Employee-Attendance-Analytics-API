@@ -173,3 +173,61 @@ def punch_in(body: PunchInIn):
         raise HTTPException(409, "already punched in for this date")
     doc.pop("_id", None)
     return serialize_log(doc)
+
+
+from decimal import Decimal, ROUND_HALF_UP
+
+
+class PunchOutIn(BaseModel):
+    emp_code: str
+    punched_at: PunchedAt | None = None
+
+
+def work_hours_half_up(punch_in_utc, punch_out_utc) -> float:
+    secs = (punch_out_utc - punch_in_utc).total_seconds()
+    return float((Decimal(str(secs)) / Decimal("3600")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+
+
+def shift_end_utc(att_date: str, shift_end: str, shift_start: str):
+    y, mo, d = map(int, att_date.split("-"))
+    h, m = map(int, shift_end.split(":"))
+    end_ist = datetime(y, mo, d, h, m, tzinfo=IST)
+    if shift_end <= shift_start:
+        end_ist = end_ist + timedelta(days=1)
+    return end_ist.astimezone(timezone.utc)
+
+
+def compute_overtime_minutes(punch_out_utc, att_date: str, shift_end: str, shift_start: str) -> int:
+    end_utc = shift_end_utc(att_date, shift_end, shift_start)
+    mins = int((punch_out_utc - end_utc).total_seconds() // 60)
+    return mins if mins >= 30 else 0
+
+
+@app.post("/attendance/punch-out")
+def punch_out(body: PunchOutIn):
+    emp = db.employees.find_one({"emp_code": body.emp_code}, {"_id": 0})
+    if not emp:
+        raise HTTPException(404, "unknown employee")
+    ts_ms = body.punched_at if body.punched_at is not None else int(datetime.now(timezone.utc).timestamp() * 1000)
+    out_utc = utc_from_ms(ts_ms)
+    cand = db.attendance_logs.find_one(
+        {"emp_code": body.emp_code, "punch_in": {"$lte": out_utc}}, sort=[("punch_in", -1)]
+    )
+    if not cand:
+        raise HTTPException(404, "no punch-in found")
+    if cand.get("punch_out"):
+        raise HTTPException(409, "already punched out")
+    in_utc = cand["punch_in"].replace(tzinfo=timezone.utc)
+    gap = (out_utc - in_utc).total_seconds()
+    if gap <= 0 or gap > 24 * 3600:
+        raise HTTPException(422, "punched_at must be after punch_in and within 24 hours")
+    wh = work_hours_half_up(in_utc, out_utc)
+    ot = compute_overtime_minutes(out_utc, cand["date"], emp["shift_end"], emp["shift_start"])
+    res = db.attendance_logs.update_one(
+        {"_id": cand["_id"], "punch_out": None},
+        {"$set": {"punch_out": out_utc, "work_hours": wh, "overtime_minutes": ot, "half_day": wh < 4.50}},
+    )
+    if res.modified_count == 0:
+        raise HTTPException(409, "already punched out")
+    updated = db.attendance_logs.find_one({"_id": cand["_id"]})
+    return serialize_log(updated)
