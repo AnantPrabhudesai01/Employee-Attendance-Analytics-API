@@ -221,7 +221,8 @@ def punch_out(body: PunchOutIn):
         raise HTTPException(404, "no punch-in found")
     if cand.get("punch_out"):
         raise HTTPException(409, "already punched out")
-    in_utc = cand["punch_in"].replace(tzinfo=timezone.utc)
+    in_raw = cand["punch_in"]
+    in_utc = in_raw if in_raw.tzinfo is not None else in_raw.replace(tzinfo=timezone.utc)
     gap = (out_utc - in_utc).total_seconds()
     if gap <= 0 or gap > 24 * 3600:
         raise HTTPException(422, "punched_at must be after punch_in and within 24 hours")
@@ -254,6 +255,10 @@ def regularize(emp_code: str, date: str, body: RegularizeIn):
     rec = db.attendance_logs.find_one({"emp_code": emp_code, "date": date})
     if not rec:
         raise HTTPException(404, "no record for that date")
+    for _k in ("punch_in", "punch_out"):
+        _v = rec.get(_k)
+        if _v is not None and _v.tzinfo is None:
+            rec[_k] = _v.replace(tzinfo=timezone.utc)
     new_status = body.status if body.status is not None else rec["status"]
     new_in_utc = utc_from_ms(body.punch_in) if body.punch_in is not None else rec.get("punch_in")
     if new_in_utc is not None:
