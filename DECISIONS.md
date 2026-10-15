@@ -1,0 +1,7 @@
+# DECISIONS.md
+
+1. **Indexes.** `employees(emp_code)` unique turns duplicate creates into one `201` + `409`s — no check-then-insert race. `employees(department, emp_code)` keeps filtered lists sorted without scanning. `attendance_logs(emp_code, date)` unique does the same for double punch-ins. `attendance_logs(date, emp_code)` covers range lists and monthly pipelines. I skipped a text index on names: the contract only exact-matches, so it would never fire.
+2. **Punch-in race.** Both requests compute the same IST date, then both insert. The unique index admits the first; the loser gets `DuplicateKeyError`, returned as `409`. No lock, no prior `find` — identical instants produce identical derived values, so either winner is correct.
+3. **Ties.** Competition ranking (`$rank`): ties share a rank, the next skips (1, 2, 2, 4). `limit` applies after ranking, so a tie at the cutoff returns extra rows instead of splitting the tie. Order is total desc, `emp_code` asc.
+4. **Headcount.** The pipeline starts from `employees` with `joined_on <= month-end` and the logs join preserves empties: zero-log people count as headcount with zeros elsewhere; future joiners never appear. Averages run over records holding `work_hours`, not over per-employee averages.
+5. **100x data.** Push final rounding into the pipelines, partition `attendance_logs` by `date`, and pre-aggregate monthly rollups — per-request `$lookup` plus gap-filling won't hold past a few million records.
