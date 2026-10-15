@@ -315,3 +315,45 @@ def regularize(emp_code: str, date: str, body: RegularizeIn):
     if res.modified_count == 0:
         raise HTTPException(409, "concurrent edit, retry")
     return serialize_log(db.attendance_logs.find_one({"_id": rec["_id"]}))
+
+
+import re
+
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+@app.get("/attendance")
+def list_attendance(
+    emp_code: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    status: Literal["PRESENT", "ABSENT", "LEAVE", "WFH", "ON_DUTY"] | None = None,
+    page: int = 1,
+    page_size: int = 20,
+):
+    if page < 1 or page_size < 1 or page_size > 100:
+        raise HTTPException(422, "bad pagination")
+    for d in (date_from, date_to):
+        if d is not None and not _DATE_RE.match(d):
+            raise HTTPException(422, "bad date")
+    if date_from and date_to and date_from > date_to:
+        raise HTTPException(422, "date_from after date_to")
+    q: dict = {}
+    if emp_code:
+        q["emp_code"] = emp_code
+    if date_from or date_to:
+        q["date"] = {}
+        if date_from:
+            q["date"]["$gte"] = date_from
+        if date_to:
+            q["date"]["$lte"] = date_to
+    if status:
+        q["status"] = status
+    total = db.attendance_logs.count_documents(q)
+    cur = (
+        db.attendance_logs.find(q)
+        .sort([("date", -1), ("emp_code", 1)])
+        .skip((page - 1) * page_size)
+        .limit(page_size)
+    )
+    return {"items": [serialize_log(d) for d in cur], "total": total, "page": page, "page_size": page_size}
