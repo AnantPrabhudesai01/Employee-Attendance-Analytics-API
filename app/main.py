@@ -1,7 +1,7 @@
 import os 
 from datetime import datetime,timedelta,timezone
 from dotenv import load_dotenv
-from fastapi import FastAPI,HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from pymongo import MongoClient
 from pymongo.errors import PyMongoError
 
@@ -535,3 +535,136 @@ def late_leaderboard(month: str, limit: int = 10, department: str | None = None)
             for r in rows
         ],
     }
+
+
+def rate4(present: float, headcount: int, working: bool):
+    if not working or headcount <= 0:
+        return None
+    return float((Decimal(str(present)) / Decimal(str(headcount))).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP))
+
+
+def avg4(vals):
+    nums = [v for v in vals if v is not None]
+    if not nums:
+        return None
+    return float((Decimal(str(sum(nums))) / Decimal(str(len(nums)))).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP))
+
+
+@app.get("/analytics/departments/{department}/trend")
+def department_trend(department: str, from_: str | None = Query(default=None, alias="from"), to: str | None = Query(default=None, alias="to")):
+    from datetime import datetime as _dt
+    f = from_
+    t = to
+    for d in (f, t):
+        if not d or not _DATE_RE.match(d):
+            raise HTTPException(422, "bad date")
+    if t < f:
+        raise HTTPException(422, "to before from")
+    if (_dt.fromisoformat(t) - _dt.fromisoformat(f)).days + 1 > 92:
+        raise HTTPException(422, "range exceeds 92 days")
+    if db.employees.count_documents({"department": department}) == 0:
+        raise HTTPException(404, "unknown department")
+    pipe = [
+        {"$documents": [{"_x": 1}]},
+        {
+            "$project": {
+                "fromD": {"$dateFromString": {"dateString": f}},
+                "toD": {"$dateFromString": {"dateString": t}},
+            }
+        },
+        {"$project": {"fromD": 1, "n": {"$add": [{"$dateDiff": {"startDate": "$fromD", "endDate": "$toD", "unit": "day"}}, 1]}}},
+        {"$project": {"fromD": 1, "offs": {"$range": [0, "$n"]}}},
+        {"$unwind": "$offs"},
+        {
+            "$project": {
+                "dayD": {"$dateAdd": {"startDate": "$fromD", "unit": "day", "amount": "$offs"}},
+            }
+        },
+        {
+            "$project": {
+                "dayD": 1,
+                "day": {"$dateToString": {"format": "%Y-%m-%d", "date": "$dayD"}},
+                "dow": {"$dayOfWeek": "$dayD"},
+            }
+        },
+        {"$project": {"dayD": 1, "day": 1, "is_working": {"$and": [{"$gte": ["$dow", 2]}, {"$lte": ["$dow", 6]}]}}},
+        {
+            "$lookup": {
+                "from": "attendance_logs",
+                "let": {"d": "$day"},
+                "pipeline": [
+                    {"$match": {"$expr": {"$eq": ["$date", "$$d"]}}},
+                    {"$lookup": {"from": "employees", "localField": "emp_code", "foreignField": "emp_code", "as": "_e"}},
+                    {"$unwind": "$_e"},
+                    {"$match": {"_e.department": department}},
+                    {
+                        "$group": {
+                            "_id": None,
+                            "present": {"$sum": {"$cond": [{"$in": ["$status", _PRESENT]}, {"$cond": [{"$eq": ["$half_day", True]}, 0.5, 1.0]}, 0.0]}},
+                            "late": {"$sum": {"$cond": [{"$gt": ["$late_minutes", 0]}, 1, 0]}},
+                        }
+                    },
+                ],
+                "as": "_s",
+            }
+        },
+        {
+            "$lookup": {
+                "from": "employees",
+                "let": {"d": "$day"},
+                "pipeline": [
+                    {"$match": {"$expr": {"$and": [{"$eq": ["$department", department]}, {"$lte": ["$joined_on", "$$d"]}]}}},
+                    {"$count": "n"},
+                ],
+                "as": "_h",
+            }
+        },
+        {
+            "$project": {
+                "dayD": 1,
+                "day": 1,
+                "is_working": 1,
+                "headcount": {"$ifNull": [{"$arrayElemAt": ["$_h.n", 0]}, 0]},
+                "present": {"$ifNull": [{"$arrayElemAt": ["$_s.present", 0]}, 0.0]},
+                "late": {"$ifNull": [{"$arrayElemAt": ["$_s.late", 0]}, 0]},
+            }
+        },
+        {
+            "$project": {
+                "dayD": 1,
+                "day": 1,
+                "is_working": 1,
+                "headcount": 1,
+                "present": 1,
+                "late": 1,
+                "rate": {"$cond": [{"$and": ["$is_working", {"$gt": ["$headcount", 0]}]}, {"$divide": ["$present", "$headcount"]}, None]},
+            }
+        },
+        {
+            "$setWindowFields": {
+                "sortBy": {"dayD": 1},
+                "output": {"mavg": {"$avg": "$rate", "window": {"documents": [-6, 0]}}},
+            }
+        },
+        {"$sort": {"dayD": 1}},
+    ]
+    rows = list(db.attendance_logs.aggregate(pipe))
+    items = []
+    for r in rows:
+        rate = rate4(float(r["present"]), int(r["headcount"]), bool(r["is_working"]))
+        items.append(
+            {
+                "date": r["day"],
+                "is_working_day": bool(r["is_working"]),
+                "headcount": int(r["headcount"]),
+                "present_count": float(r["present"]),
+                "late_count": int(r["late"]),
+                "attendance_rate": rate,
+                "moving_avg_7d": None,
+            }
+        )
+    rates = [it["attendance_rate"] for it in items]
+    for i, it in enumerate(items):
+        window = [v for v in rates[max(0, i - 6) : i + 1] if v is not None]
+        it["moving_avg_7d"] = avg4(window)
+    return {"department": department, "items": items}
