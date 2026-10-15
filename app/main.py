@@ -1,38 +1,45 @@
-import os 
-from datetime import datetime,timedelta,timezone
+import os
+import re
+from calendar import monthrange
+from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal, ROUND_HALF_UP
+from typing import Annotated, Literal
+
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field, StrictInt
 from pymongo import MongoClient
-from pymongo.errors import PyMongoError
+from pymongo.errors import DuplicateKeyError, PyMongoError
 
 
 load_dotenv()
-client =MongoClient(os.getenv("MONGO_URI",  "mongodb://localhost:27017"), serverSelectionTimeoutMS=2000)
-db = client[os.getenv("MONGO_DB","attendance_db")]
+client = MongoClient(os.getenv("MONGO_URI", "mongodb://localhost:27017"), serverSelectionTimeoutMS=2000)
+db = client[os.getenv("MONGO_DB", "attendance_db")]
 
-IST = timezone(timedelta(hours=5,minutes=30))
+IST = timezone(timedelta(hours=5, minutes=30))
 
-app=FastAPI(title = "Employee Attendance & Analytics API" ,version="2.0.0")
+app = FastAPI(title="Employee Attendance & Analytics API", version="2.0.0")
 
 
-@app.get('/health')
+# -------------------------------------------------------------------
+# 1. Health — GET /health
+# -------------------------------------------------------------------
+@app.get("/health")
 def health():
     try:
         db.command("ping")
-        return {"status" : "ok"}
+        return {"status": "ok"}
     except PyMongoError:
-        from fastapi.responses import JSONResponse
-        return JSONResponse(status_code=503,content={"detail":"Mongo Unreachable"})
+        return JSONResponse(status_code=503, content={"detail": "Mongo Unreachable"})
 
 
-from pydantic import BaseModel, Field
-from pymongo.errors import DuplicateKeyError
-from contextlib import asynccontextmanager
-
-
-
+# -------------------------------------------------------------------
+# 2. Models and startup indexes
+# -------------------------------------------------------------------
 class EmployeeIn(BaseModel):
-    emp_code: str = Field(pattern =r"^EMP\d{4,6}$")
+    emp_code: str = Field(pattern=r"^EMP\d{4,6}$")
     name: str = Field(min_length=1, max_length=100)
     email: str = Field(max_length=120, pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
     department: str = Field(min_length=1, max_length=50)
@@ -49,8 +56,12 @@ def ensure_indexes():
     try:
         db.employees.create_index("emp_code", unique=True)
         db.employees.create_index([("department", 1), ("emp_code", 1)])
+        db.employees.create_index([("department", 1), ("joined_on", 1)])
+        db.employees.create_index([("joined_on", 1)])
         db.attendance_logs.create_index([("emp_code", 1), ("date", 1)], unique=True)
         db.attendance_logs.create_index([("date", 1), ("emp_code", 1)])
+        db.attendance_logs.create_index([("date", -1), ("emp_code", 1)])
+        db.attendance_logs.create_index([("status", 1), ("date", -1), ("emp_code", 1)])
     except Exception:
         pass
 
@@ -59,9 +70,14 @@ async def lifespan(app: FastAPI):
     ensure_indexes()
     yield
 
-app.router.lifespan_context =lifespan
+app.router.lifespan_context = lifespan
+
+
+# -------------------------------------------------------------------
+# Employees — POST /employees, GET /employees
+# -------------------------------------------------------------------
 def ms(dt) -> int:
-    return int(dt.replace(tzinfo=timezone.utc).timestamp()*1000)
+    return int(dt.replace(tzinfo=timezone.utc).timestamp() * 1000)
 
 
 @app.post("/employees", status_code=201)
@@ -90,10 +106,6 @@ def list_employees(department: str | None = None, page: int = 1, page_size: int 
     items = [{**d, "created_at": ms(d["created_at"])} for d in cur]
     return {"items": items, "total": total, "page": page, "page_size": page_size}
 
-
-from typing import Literal
-from pydantic import StrictInt
-from typing import Annotated
 
 PunchedAt = Annotated[StrictInt, Field(ge=100000000000, le=4102444800000)]
 PresenceStatus = Literal["PRESENT", "WFH", "ON_DUTY"]
@@ -150,6 +162,9 @@ def serialize_log(doc) -> dict:
     return out
 
 
+# -------------------------------------------------------------------
+# Attendance — POST /attendance/punch-in
+# -------------------------------------------------------------------
 @app.post("/attendance/punch-in", status_code=201)
 def punch_in(body: PunchInIn):
     emp = db.employees.find_one({"emp_code": body.emp_code}, {"_id": 0})
@@ -179,9 +194,6 @@ def punch_in(body: PunchInIn):
     return serialize_log(doc)
 
 
-from decimal import Decimal, ROUND_HALF_UP
-
-
 class PunchOutIn(BaseModel):
     emp_code: str
     punched_at: PunchedAt | None = None
@@ -207,6 +219,9 @@ def compute_overtime_minutes(punch_out_utc, att_date: str, shift_end: str, shift
     return mins if mins >= 30 else 0
 
 
+# -------------------------------------------------------------------
+# Attendance — POST /attendance/punch-out
+# -------------------------------------------------------------------
 @app.post("/attendance/punch-out")
 def punch_out(body: PunchOutIn):
     emp = db.employees.find_one({"emp_code": body.emp_code}, {"_id": 0})
@@ -247,6 +262,9 @@ class RegularizeIn(BaseModel):
     regularized_by: str = Field(min_length=1, max_length=50)
 
 
+# -------------------------------------------------------------------
+# Attendance — PATCH /attendance/{emp_code}/{date} (regularize)
+# -------------------------------------------------------------------
 @app.patch("/attendance/{emp_code}/{date}")
 def regularize(emp_code: str, date: str, body: RegularizeIn):
     emp = db.employees.find_one({"emp_code": emp_code}, {"_id": 0})
@@ -326,8 +344,9 @@ def regularize(emp_code: str, date: str, body: RegularizeIn):
     return serialize_log(db.attendance_logs.find_one({"_id": rec["_id"]}))
 
 
-import re
-
+# -------------------------------------------------------------------
+# Attendance — GET /attendance (list_attendance)
+# -------------------------------------------------------------------
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
@@ -368,12 +387,14 @@ def list_attendance(
     return {"items": [serialize_log(d) for d in cur], "total": total, "page": page, "page_size": page_size}
 
 
+# -------------------------------------------------------------------
+# Analytics — monthly, department summary, leaderboard, trend
+# -------------------------------------------------------------------
 _MONTH_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 _PRESENT = ["PRESENT", "WFH", "ON_DUTY"]
 
 
 def working_days_in_month(joined_on: str, month: str) -> int:
-    from calendar import monthrange
     y, m = map(int, month.split("-"))
     jy, jm, jd = map(int, joined_on.split("-"))
     start = max(1, jd if (jy, jm) == (y, m) else 1)
@@ -557,24 +578,26 @@ def avg4(vals):
 
 @app.get("/analytics/departments/{department}/trend")
 def department_trend(department: str, from_: str | None = Query(default=None, alias="from"), to: str | None = Query(default=None, alias="to")):
-    from datetime import datetime as _dt
-    f = from_
-    t = to
-    for d in (f, t):
+    from_date = from_
+    to_date = to
+    for d in (from_date, to_date):
         if not d or not _DATE_RE.match(d):
             raise HTTPException(422, "bad date")
-    if t < f:
+    if to_date < from_date:
         raise HTTPException(422, "to before from")
-    if (_dt.fromisoformat(t) - _dt.fromisoformat(f)).days + 1 > 92:
+    if (datetime.fromisoformat(to_date) - datetime.fromisoformat(from_date)).days + 1 > 92:
         raise HTTPException(422, "range exceeds 92 days")
     if db.employees.count_documents({"department": department}) == 0:
         raise HTTPException(404, "unknown department")
+    # Day rows are generated inside MongoDB ($range+$unwind over the dept's
+    # own document): gap-filling stays in the database, no Python date loop.
     pipe = [
-        {"$documents": [{"_x": 1}]},
+        {"$match": {"department": department}},
+        {"$limit": 1},
         {
             "$project": {
-                "fromD": {"$dateFromString": {"dateString": f}},
-                "toD": {"$dateFromString": {"dateString": t}},
+                "fromD": {"$dateFromString": {"dateString": from_date}},
+                "toD": {"$dateFromString": {"dateString": to_date}},
             }
         },
         {"$project": {"fromD": 1, "n": {"$add": [{"$dateDiff": {"startDate": "$fromD", "endDate": "$toD", "unit": "day"}}, 1]}}},
@@ -653,7 +676,7 @@ def department_trend(department: str, from_: str | None = Query(default=None, al
         },
         {"$sort": {"dayD": 1}},
     ]
-    rows = list(db.attendance_logs.aggregate(pipe))
+    rows = list(db.employees.aggregate(pipe))
     items = []
     for r in rows:
         rate = rate4(float(r["present"]), int(r["headcount"]), bool(r["is_working"]))
@@ -675,6 +698,9 @@ def department_trend(department: str, from_: str | None = Query(default=None, al
     return {"department": department, "items": items}
 
 
+# -------------------------------------------------------------------
+# Admin — GET /admin/explain/{endpoint}
+# -------------------------------------------------------------------
 ExplainName = Literal["attendance_list", "employee_monthly", "department_summary", "late_leaderboard", "department_trend"]
 
 
@@ -803,8 +829,17 @@ def explain_endpoint(
     if to < from_:
         raise HTTPException(422, "to before from")
     pipe = [
-        {"$documents": [{"_x": 1}]},
-        {"$project": {"fromD": {"$dateFromString": {"dateString": from_}}}},
+        {"$match": {"department": department}},
+        {"$limit": 1},
+        {
+            "$project": {
+                "fromD": {"$dateFromString": {"dateString": from_}},
+                "toD": {"$dateFromString": {"dateString": to}},
+            }
+        },
+        {"$project": {"fromD": 1, "n": {"$add": [{"$dateDiff": {"startDate": "$fromD", "endDate": "$toD", "unit": "day"}}, 1]}}},
+        {"$project": {"fromD": 1, "offs": {"$range": [0, "$n"]}}},
+        {"$unwind": "$offs"},
         {
             "$lookup": {
                 "from": "attendance_logs",
@@ -814,5 +849,5 @@ def explain_endpoint(
             }
         },
     ]
-    out = _explain_agg("attendance_logs", pipe)
-    return {"endpoint": endpoint, "collection": "attendance_logs", "explain": out}
+    out = _explain_agg("employees", pipe)
+    return {"endpoint": endpoint, "collection": "employees", "explain": out}
