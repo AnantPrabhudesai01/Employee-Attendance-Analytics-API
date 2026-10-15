@@ -668,3 +668,146 @@ def department_trend(department: str, from_: str | None = Query(default=None, al
         window = [v for v in rates[max(0, i - 6) : i + 1] if v is not None]
         it["moving_avg_7d"] = avg4(window)
     return {"department": department, "items": items}
+
+
+ExplainName = Literal["attendance_list", "employee_monthly", "department_summary", "late_leaderboard", "department_trend"]
+
+
+def _explain_find(coll, filt, sort, skip, limit):
+    cur = db[coll].find(filt)
+    if sort:
+        cur = cur.sort(sort)
+    if skip:
+        cur = cur.skip(skip)
+    if limit is not None:
+        cur = cur.limit(limit)
+    return cur.explain()
+
+
+def _explain_agg(coll, pipeline):
+    return db.command({"explain": {"aggregate": coll, "pipeline": pipeline, "cursor": {}}, "verbosity": "executionStats"})
+
+
+@app.get("/admin/explain/{endpoint}")
+def explain_endpoint(
+    endpoint: ExplainName,
+    emp_code: str | None = None,
+    month: str | None = None,
+    department: str | None = None,
+    limit: int = 10,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    status: Literal["PRESENT", "ABSENT", "LEAVE", "WFH", "ON_DUTY"] | None = None,
+    from_: str | None = Query(default=None, alias="from"),
+    to: str | None = Query(default=None, alias="to"),
+    page: int = 1,
+    page_size: int = 20,
+):
+    # NOTE: filters/sort/pagination mirror the real endpoints' construction.
+    if endpoint == "attendance_list":
+        if page < 1 or page_size < 1 or page_size > 100:
+            raise HTTPException(422, "bad pagination")
+        for d in (date_from, date_to):
+            if d is not None and not _DATE_RE.match(d):
+                raise HTTPException(422, "bad date")
+        if date_from and date_to and date_from > date_to:
+            raise HTTPException(422, "date_from after date_to")
+        q: dict = {}
+        if emp_code:
+            q["emp_code"] = emp_code
+        if date_from or date_to:
+            q["date"] = {}
+            if date_from:
+                q["date"]["$gte"] = date_from
+            if date_to:
+                q["date"]["$lte"] = date_to
+        if status:
+            q["status"] = status
+        out = _explain_find("attendance_logs", q, [("date", -1), ("emp_code", 1)], (page - 1) * page_size, page_size)
+        return {"endpoint": endpoint, "collection": "attendance_logs", "explain": out}
+    if endpoint == "employee_monthly":
+        if not emp_code or not month or not _MONTH_RE.match(month):
+            raise HTTPException(422, "emp_code and month required")
+        pipe = [
+            {"$match": {"emp_code": emp_code, "date": {"$gte": f"{month}-01", "$lte": f"{month}-31"}}},
+            {"$addFields": {"_dow": {"$dayOfWeek": {"$dateFromString": {"dateString": "$date"}}}}},
+            {"$addFields": {"_wd": {"$and": [{"$gte": ["$_dow", 2]}, {"$lte": ["$_dow", 6]}]}}},
+            {
+                "$group": {
+                    "_id": None,
+                    "present_days": {"$sum": {"$cond": [{"$and": [{"$in": ["$status", _PRESENT]}, "$_wd"]}, {"$cond": [{"$eq": ["$half_day", True]}, 0.5, 1.0]}, 0.0]}},
+                    "leave_days": {"$sum": {"$cond": [{"$eq": ["$status", "LEAVE"]}, 1, 0]}},
+                    "late_count": {"$sum": {"$cond": [{"$gt": ["$late_minutes", 0]}, 1, 0]}},
+                    "total_late_minutes": {"$sum": {"$ifNull": ["$late_minutes", 0]}},
+                    "total_overtime_minutes": {"$sum": {"$ifNull": ["$overtime_minutes", 0]}},
+                }
+            },
+        ]
+        out = _explain_agg("attendance_logs", pipe)
+        return {"endpoint": endpoint, "collection": "attendance_logs", "explain": out}
+    if endpoint == "department_summary":
+        if not month or not _MONTH_RE.match(month):
+            raise HTTPException(422, "month required")
+        month_end = f"{month}-31"
+        emp_match: dict = {"joined_on": {"$lte": month_end}}
+        if department:
+            emp_match["department"] = department
+        pipe = [
+            {"$match": emp_match},
+            {
+                "$lookup": {
+                    "from": "attendance_logs",
+                    "let": {"ec": "$emp_code"},
+                    "pipeline": [
+                        {"$match": {"$expr": {"$and": [{"$eq": ["$emp_code", "$$ec"]}, {"$gte": ["$date", f"{month}-01"]}, {"$lte": ["$date", f"{month}-31"]}]}}},
+                    ],
+                    "as": "_logs",
+                }
+            },
+        ]
+        out = _explain_agg("employees", pipe)
+        return {"endpoint": endpoint, "collection": "employees", "explain": out}
+    if endpoint == "late_leaderboard":
+        if not month or not _MONTH_RE.match(month):
+            raise HTTPException(422, "month required")
+        if limit < 1 or limit > 50:
+            raise HTTPException(422, "bad limit")
+        match_dept = [{"$match": {"_e.department": department}}] if department else []
+        pipe = [
+            {"$match": {"date": {"$gte": f"{month}-01", "$lte": f"{month}-31"}}},
+            {"$lookup": {"from": "employees", "localField": "emp_code", "foreignField": "emp_code", "as": "_e"}},
+            {"$unwind": "$_e"},
+            *match_dept,
+            {
+                "$group": {
+                    "_id": "$emp_code",
+                    "total_late_minutes": {"$sum": {"$ifNull": ["$late_minutes", 0]}},
+                    "late_count": {"$sum": {"$cond": [{"$gt": ["$late_minutes", 0]}, 1, 0]}},
+                }
+            },
+            {"$match": {"total_late_minutes": {"$gt": 0}}},
+            {"$sort": {"total_late_minutes": -1, "_id": 1}},
+        ]
+        out = _explain_agg("attendance_logs", pipe)
+        return {"endpoint": endpoint, "collection": "attendance_logs", "explain": out}
+    # department_trend
+    if not department or not from_ or not to:
+        raise HTTPException(422, "department, from and to required")
+    if not _DATE_RE.match(from_) or not _DATE_RE.match(to):
+        raise HTTPException(422, "bad date")
+    if to < from_:
+        raise HTTPException(422, "to before from")
+    pipe = [
+        {"$documents": [{"_x": 1}]},
+        {"$project": {"fromD": {"$dateFromString": {"dateString": from_}}}},
+        {
+            "$lookup": {
+                "from": "attendance_logs",
+                "let": {"d": from_},
+                "pipeline": [{"$match": {"$expr": {"$eq": ["$date", "$$d"]}}}],
+                "as": "_s",
+            }
+        },
+    ]
+    out = _explain_agg("attendance_logs", pipe)
+    return {"endpoint": endpoint, "collection": "attendance_logs", "explain": out}
