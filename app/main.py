@@ -424,3 +424,65 @@ def employee_monthly(emp_code: str, month: str):
         "total_overtime_minutes": int(r.get("total_overtime_minutes", 0)),
         "attendance_pct": pct2(present, working),
     }
+
+
+def avg2_half_up(vals):
+    nums = [v for v in vals if isinstance(v, (int, float))]
+    if not nums:
+        return None
+    return float((Decimal(str(sum(nums))) / Decimal(str(len(nums)))).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+
+
+@app.get("/analytics/departments/summary")
+def department_summary(month: str, department: str | None = None):
+    if not _MONTH_RE.match(month or ""):
+        raise HTTPException(422, "bad month")
+    month_end = f"{month}-31"
+    emp_match: dict = {"joined_on": {"$lte": month_end}}
+    if department:
+        emp_match["department"] = department
+    pipe = [
+        {"$match": emp_match},
+        {
+            "$lookup": {
+                "from": "attendance_logs",
+                "let": {"ec": "$emp_code"},
+                "pipeline": [
+                    {"$match": {"$expr": {"$and": [{"$eq": ["$emp_code", "$$ec"]}, {"$gte": ["$date", f"{month}-01"]}, {"$lte": ["$date", f"{month}-31"]}]}}},
+                    {"$addFields": {"_dow": {"$dayOfWeek": {"$dateFromString": {"dateString": "$date"}}}}},
+                    {"$addFields": {"_wd": {"$and": [{"$gte": ["$_dow", 2]}, {"$lte": ["$_dow", 6]}]}}},
+                ],
+                "as": "_logs",
+            }
+        },
+        {"$unwind": {"path": "$_logs", "preserveNullAndEmptyArrays": True}},
+        {
+            "$group": {
+                "_id": "$department",
+                "emp_codes": {"$addToSet": "$emp_code"},
+                "present_days": {"$sum": {"$cond": [{"$and": [{"$in": ["$_logs.status", _PRESENT]}, "$_logs._wd"]}, {"$cond": [{"$eq": ["$_logs.half_day", True]}, 0.5, 1.0]}, 0.0]}},
+                "work_vals": {"$push": {"$cond": [{"$and": [{"$in": ["$_logs.status", _PRESENT]}, {"$ne": ["$_logs.work_hours", None]}]}, "$_logs.work_hours", None]}},
+                "late_count": {"$sum": {"$cond": [{"$gt": ["$_logs.late_minutes", 0]}, 1, 0]}},
+                "total_late_minutes": {"$sum": {"$ifNull": ["$_logs.late_minutes", 0]}},
+                "leave_count": {"$sum": {"$cond": [{"$eq": ["$_logs.status", "LEAVE"]}, 1, 0]}},
+                "on_duty_count": {"$sum": {"$cond": [{"$eq": ["$_logs.status", "ON_DUTY"]}, 1, 0]}},
+            }
+        },
+        {"$sort": {"_id": 1}},
+    ]
+    rows = list(db.employees.aggregate(pipe))
+    items = []
+    for r in rows:
+        items.append(
+            {
+                "department": r["_id"],
+                "headcount": len(r["emp_codes"]),
+                "present_days": float(r.get("present_days", 0.0)),
+                "avg_work_hours": avg2_half_up(r.get("work_vals", [])),
+                "late_count": int(r.get("late_count", 0)),
+                "total_late_minutes": int(r.get("total_late_minutes", 0)),
+                "leave_count": int(r.get("leave_count", 0)),
+                "on_duty_count": int(r.get("on_duty_count", 0)),
+            }
+        )
+    return {"month": month, "items": items}
