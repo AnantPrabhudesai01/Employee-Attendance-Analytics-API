@@ -7,7 +7,7 @@ from pymongo.errors import PyMongoError
 
 
 load_dotenv()
-client =MongoClient(os.getenv("MONGO_URI",  "mongodb://localhost:27017"), serverSelectionTimeoutMS=5000)
+client =MongoClient(os.getenv("MONGO_URI",  "mongodb://localhost:27017"), serverSelectionTimeoutMS=2000)
 db = client[os.getenv("MONGO_DB","attendance_db")]
 
 IST = timezone(timedelta(hours=5,minutes=30))
@@ -42,6 +42,10 @@ class EmployeeIn(BaseModel):
 
 
 def ensure_indexes():
+    try:
+        db.command("ping")
+    except Exception:
+        return
     try:
         db.employees.create_index("emp_code", unique=True)
         db.employees.create_index([("department", 1), ("emp_code", 1)])
@@ -357,3 +361,66 @@ def list_attendance(
         .limit(page_size)
     )
     return {"items": [serialize_log(d) for d in cur], "total": total, "page": page, "page_size": page_size}
+
+
+_MONTH_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
+_PRESENT = ["PRESENT", "WFH", "ON_DUTY"]
+
+
+def working_days_in_month(joined_on: str, month: str) -> int:
+    from calendar import monthrange
+    y, m = map(int, month.split("-"))
+    jy, jm, jd = map(int, joined_on.split("-"))
+    start = max(1, jd if (jy, jm) == (y, m) else 1)
+    end = monthrange(y, m)[1]
+    n = 0
+    for d in range(start, end + 1):
+        wd = datetime(y, m, d).weekday()
+        if wd < 5:
+            n += 1
+    return n
+
+
+def pct2(present: float, working: int):
+    if working == 0:
+        return None
+    return float((Decimal(str(present)) / Decimal(str(working)) * Decimal("100")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+
+
+@app.get("/analytics/employees/{emp_code}/monthly")
+def employee_monthly(emp_code: str, month: str):
+    if not _MONTH_RE.match(month or ""):
+        raise HTTPException(422, "bad month")
+    emp = db.employees.find_one({"emp_code": emp_code}, {"_id": 0})
+    if not emp:
+        raise HTTPException(404, "unknown employee")
+    working = working_days_in_month(emp["joined_on"], month)
+    pipe = [
+        {"$match": {"emp_code": emp_code, "date": {"$gte": f"{month}-01", "$lte": f"{month}-31"}}},
+        {"$addFields": {"_dow": {"$dayOfWeek": {"$dateFromString": {"dateString": "$date"}}}}},
+        {"$addFields": {"_wd": {"$and": [{"$gte": ["$_dow", 2]}, {"$lte": ["$_dow", 6]}]}}},
+        {
+            "$group": {
+                "_id": None,
+                "present_days": {"$sum": {"$cond": [{"$and": [{"$in": ["$status", _PRESENT]}, "$_wd"]}, {"$cond": [{"$eq": ["$half_day", True]}, 0.5, 1.0]}, 0.0]}},
+                "leave_days": {"$sum": {"$cond": [{"$eq": ["$status", "LEAVE"]}, 1, 0]}},
+                "late_count": {"$sum": {"$cond": [{"$gt": ["$late_minutes", 0]}, 1, 0]}},
+                "total_late_minutes": {"$sum": {"$ifNull": ["$late_minutes", 0]}},
+                "total_overtime_minutes": {"$sum": {"$ifNull": ["$overtime_minutes", 0]}},
+            }
+        },
+    ]
+    rows = list(db.attendance_logs.aggregate(pipe))
+    r = rows[0] if rows else {}
+    present = float(r.get("present_days", 0.0))
+    return {
+        "emp_code": emp_code,
+        "month": month,
+        "working_days": working,
+        "present_days": present,
+        "leave_days": int(r.get("leave_days", 0)),
+        "late_count": int(r.get("late_count", 0)),
+        "total_late_minutes": int(r.get("total_late_minutes", 0)),
+        "total_overtime_minutes": int(r.get("total_overtime_minutes", 0)),
+        "attendance_pct": pct2(present, working),
+    }
