@@ -85,3 +85,91 @@ def list_employees(department: str | None = None, page: int = 1, page_size: int 
     cur = db.employees.find(q, {"_id": 0}).sort("emp_code", 1).skip((page - 1) * page_size).limit(page_size)
     items = [{**d, "created_at": ms(d["created_at"])} for d in cur]
     return {"items": items, "total": total, "page": page, "page_size": page_size}
+
+
+from typing import Literal
+from pydantic import StrictInt
+from typing import Annotated
+
+PunchedAt = Annotated[StrictInt, Field(ge=100000000000, le=4102444800000)]
+PresenceStatus = Literal["PRESENT", "WFH", "ON_DUTY"]
+
+
+class PunchInIn(BaseModel):
+    emp_code: str
+    punched_at: PunchedAt | None = None
+    status: PresenceStatus = "PRESENT"
+
+
+def utc_from_ms(ts_ms: int):
+    return datetime.fromtimestamp(ts_ms // 1000, tz=timezone.utc).replace(microsecond=0)
+
+
+def ist_of(dt_utc):
+    return dt_utc.astimezone(IST)
+
+
+def attendance_date_for(punch_utc, shift_start: str, shift_end: str) -> str:
+    p_ist = ist_of(punch_utc)
+    if shift_end <= shift_start and p_ist.strftime("%H:%M") < shift_end:
+        return (p_ist - timedelta(days=1)).date().isoformat()
+    return p_ist.date().isoformat()
+
+
+def compute_late_minutes(punch_utc, att_date: str, shift_start: str) -> int:
+    h, m = map(int, shift_start.split(":"))
+    y, mo, d = map(int, att_date.split("-"))
+    start_ist = datetime(y, mo, d, h, m, tzinfo=IST)
+    diff = (ist_of(punch_utc) - start_ist).total_seconds()
+    if diff <= 600:
+        return 0
+    return int(diff // 60)
+
+
+def serialize_log(doc) -> dict:
+    out = {k: doc.get(k) for k in ("emp_code", "date", "status", "work_hours", "late_minutes", "overtime_minutes", "half_day")}
+    out["punch_in"] = ms(doc["punch_in"]) if doc.get("punch_in") else None
+    out["punch_out"] = ms(doc["punch_out"]) if doc.get("punch_out") else None
+    hist = []
+    for h in doc.get("history") or []:
+        ch = {}
+        for k, v in (h.get("changes") or {}).items():
+            if k in ("punch_in", "punch_out"):
+                ch[k] = {
+                    "from": ms(v["from"]) if v.get("from") else None,
+                    "to": ms(v["to"]) if v.get("to") else None,
+                }
+            else:
+                ch[k] = v
+        hist.append({"at": ms(h["at"]), "by": h["by"], "reason": h["reason"], "changes": ch})
+    out["history"] = hist
+    return out
+
+
+@app.post("/attendance/punch-in", status_code=201)
+def punch_in(body: PunchInIn):
+    emp = db.employees.find_one({"emp_code": body.emp_code}, {"_id": 0})
+    if not emp:
+        raise HTTPException(404, "unknown employee")
+    ts_ms = body.punched_at if body.punched_at is not None else int(datetime.now(timezone.utc).timestamp() * 1000)
+    punch_utc = utc_from_ms(ts_ms)
+    att_date = attendance_date_for(punch_utc, emp["shift_start"], emp["shift_end"])
+    late = compute_late_minutes(punch_utc, att_date, emp["shift_start"])
+    doc = {
+        "emp_code": body.emp_code,
+        "date": att_date,
+        "status": body.status,
+        "punch_in": punch_utc,
+        "punch_out": None,
+        "work_hours": None,
+        "late_minutes": late,
+        "overtime_minutes": 0,
+        "half_day": False,
+        "history": [],
+    }
+    try:
+        db.attendance_logs.insert_one(doc)
+    except DuplicateKeyError:
+        raise HTTPException(409, "already punched in for this date")
+    doc.pop("_id", None)
+    return serialize_log(doc)
