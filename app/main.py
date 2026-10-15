@@ -9,7 +9,7 @@ from typing import Annotated, Literal
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field, StrictInt
+from pydantic import BaseModel, Field, StrictInt, field_validator
 from pymongo import MongoClient
 from pymongo.errors import DuplicateKeyError, PyMongoError
 
@@ -46,6 +46,15 @@ class EmployeeIn(BaseModel):
     shift_start: str = Field(default="09:30", pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
     shift_end: str = Field(default="18:30", pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
     joined_on: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
+
+    @field_validator("joined_on")
+    @classmethod
+    def _real_calendar_date(cls, v: str) -> str:
+        try:
+            datetime.fromisoformat(v)
+        except ValueError:
+            raise ValueError("bad date")
+        return v
 
 
 def ensure_indexes():
@@ -267,6 +276,8 @@ class RegularizeIn(BaseModel):
 # -------------------------------------------------------------------
 @app.patch("/attendance/{emp_code}/{date}")
 def regularize(emp_code: str, date: str, body: RegularizeIn):
+    if _bad_date(date):
+        raise HTTPException(422, "bad date")
     emp = db.employees.find_one({"emp_code": emp_code}, {"_id": 0})
     if not emp:
         raise HTTPException(404, "unknown employee")
@@ -350,6 +361,16 @@ def regularize(emp_code: str, date: str, body: RegularizeIn):
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
+def _bad_date(s: str | None) -> bool:
+    if not s or not _DATE_RE.match(s):
+        return True
+    try:
+        datetime.fromisoformat(s)
+        return False
+    except ValueError:
+        return True
+
+
 @app.get("/attendance")
 def list_attendance(
     emp_code: str | None = None,
@@ -362,7 +383,7 @@ def list_attendance(
     if page < 1 or page_size < 1 or page_size > 100:
         raise HTTPException(422, "bad pagination")
     for d in (date_from, date_to):
-        if d is not None and not _DATE_RE.match(d):
+        if d is not None and _bad_date(d):
             raise HTTPException(422, "bad date")
     if date_from and date_to and date_from > date_to:
         raise HTTPException(422, "date_from after date_to")
@@ -577,12 +598,11 @@ def avg4(vals):
 
 
 @app.get("/analytics/departments/{department}/trend")
-def department_trend(department: str, from_: str | None = Query(default=None, alias="from"), to: str | None = Query(default=None, alias="to")):
+def department_trend(department: str, from_: str = Query(alias="from"), to: str = Query(alias="to")):
     from_date = from_
     to_date = to
-    for d in (from_date, to_date):
-        if not d or not _DATE_RE.match(d):
-            raise HTTPException(422, "bad date")
+    if _bad_date(from_date) or _bad_date(to_date):
+        raise HTTPException(422, "bad date")
     if to_date < from_date:
         raise HTTPException(422, "to before from")
     if (datetime.fromisoformat(to_date) - datetime.fromisoformat(from_date)).days + 1 > 92:
@@ -705,14 +725,18 @@ ExplainName = Literal["attendance_list", "employee_monthly", "department_summary
 
 
 def _explain_find(coll, filt, sort, skip, limit):
-    cur = db[coll].find(filt)
-    if sort:
-        cur = cur.sort(sort)
-    if skip:
-        cur = cur.skip(skip)
-    if limit is not None:
-        cur = cur.limit(limit)
-    return cur.explain()
+    return db.command(
+        {
+            "explain": {
+                "find": coll,
+                "filter": filt,
+                "sort": dict(sort) if sort else None,
+                "skip": skip or 0,
+                "limit": limit if limit is not None else 0,
+            },
+            "verbosity": "executionStats",
+        }
+    )
 
 
 def _explain_agg(coll, pipeline):
@@ -734,6 +758,15 @@ def explain_endpoint(
     page: int = 1,
     page_size: int = 20,
 ):
+    if month is not None and not _MONTH_RE.match(month):
+        raise HTTPException(422, "bad month")
+    if limit < 1 or limit > 50:
+        raise HTTPException(422, "bad limit")
+    for d in (date_from, date_to, from_, to):
+        if d is not None and _bad_date(d):
+            raise HTTPException(422, "bad date")
+    if page < 1 or page_size < 1 or page_size > 100:
+        raise HTTPException(422, "bad pagination")
     # NOTE: filters/sort/pagination mirror the real endpoints' construction.
     if endpoint == "attendance_list":
         if page < 1 or page_size < 1 or page_size > 100:

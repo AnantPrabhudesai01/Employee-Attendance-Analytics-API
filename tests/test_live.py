@@ -72,3 +72,24 @@ def test_zero_log_employee_counts_in_headcount():
     assert r.status_code == 200
     (item,) = r.json()["items"]
     assert item["headcount"] == 1 and item["present_days"] == 0 and item["avg_work_hours"] is None
+
+
+@needs_db
+def test_patch_appends_single_history_entry_with_recompute():
+    _reset()
+    c.post("/employees", json={"emp_code": "EMP9401", "name": "P", "email": "p@x.co", "department": "QA", "joined_on": "2026-08-01"})
+    base = _ms(2026, 8, 12, 4, 35)
+    c.post("/attendance/punch-in", json={"emp_code": "EMP9401", "punched_at": base})
+    c.post("/attendance/punch-out", json={"emp_code": "EMP9401", "punched_at": base + 9 * 3600 * 1000})
+    r = c.patch(
+        "/attendance/EMP9401/2026-08-12",
+        json={"punch_in": base - 1800000, "reason": "clock was slow", "regularized_by": "hr.test"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert len(body["history"]) == 1
+    entry = body["history"][0]
+    assert entry["by"] == "hr.test" and entry["reason"] == "clock was slow"
+    assert set(entry["changes"]) == {"punch_in", "late_minutes", "work_hours"}
+    assert body["late_minutes"] == 0
+    assert c.patch("/attendance/EMP9401/2026-08-12", json={"reason": "nothing new here", "regularized_by": "hr"}).status_code == 422
