@@ -18,6 +18,16 @@ except Exception:
 needs_db = pytest.mark.skipif(not LIVE, reason="needs live MongoDB")
 c = TestClient(app, raise_server_exceptions=False)
 
+_TEST_EMPS = ["EMP9101", "EMP9201", "EMP9202", "EMP9203", "EMP9301"]
+
+
+def _reset():
+    from pymongo import MongoClient
+
+    db = MongoClient("mongodb://localhost:27017")["attendance_db"]
+    db.attendance_logs.delete_many({"emp_code": {"$in": _TEST_EMPS}})
+    db.employees.delete_many({"emp_code": {"$in": _TEST_EMPS}})
+
 
 def _ms(y, mo, d, h, mi):
     return int(datetime.datetime(y, mo, d, h, mi, tzinfo=datetime.timezone.utc).timestamp() * 1000)
@@ -27,6 +37,7 @@ def _ms(y, mo, d, h, mi):
 def test_parallel_punch_in_race():
     from concurrent.futures import ThreadPoolExecutor
 
+    _reset()
     c.post("/employees", json={"emp_code": "EMP9101", "name": "R", "email": "r@x.co", "department": "QA", "joined_on": "2026-08-01"})
     pi = _ms(2026, 8, 10, 3, 58)
 
@@ -41,6 +52,7 @@ def test_parallel_punch_in_race():
 
 @needs_db
 def test_leaderboard_tie_shares_rank_and_overflows_limit():
+    _reset()
     for code in ("EMP9201", "EMP9202", "EMP9203"):
         c.post("/employees", json={"emp_code": code, "name": "T", "email": "t@x.co", "department": "QAT", "joined_on": "2026-08-01"})
         pi = _ms(2026, 8, 11, 4, 35)
@@ -54,6 +66,7 @@ def test_leaderboard_tie_shares_rank_and_overflows_limit():
 
 @needs_db
 def test_zero_log_employee_counts_in_headcount():
+    _reset()
     c.post("/employees", json={"emp_code": "EMP9301", "name": "Z", "email": "z@x.co", "department": "QAZ", "joined_on": "2026-07-01"})
     r = c.get("/analytics/departments/summary", params={"month": "2026-07", "department": "QAZ"})
     assert r.status_code == 200
