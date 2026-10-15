@@ -486,3 +486,52 @@ def department_summary(month: str, department: str | None = None):
             }
         )
     return {"month": month, "items": items}
+
+
+@app.get("/analytics/leaderboard/late")
+def late_leaderboard(month: str, limit: int = 10, department: str | None = None):
+    if not _MONTH_RE.match(month or ""):
+        raise HTTPException(422, "bad month")
+    if limit < 1 or limit > 50:
+        raise HTTPException(422, "bad limit")
+    match_dept = [{"$match": {"_e.department": department}}] if department else []
+    pipe = [
+        {"$match": {"date": {"$gte": f"{month}-01", "$lte": f"{month}-31"}}},
+        {"$lookup": {"from": "employees", "localField": "emp_code", "foreignField": "emp_code", "as": "_e"}},
+        {"$unwind": "$_e"},
+        *match_dept,
+        {
+            "$group": {
+                "_id": "$emp_code",
+                "name": {"$first": "$_e.name"},
+                "dept": {"$first": "$_e.department"},
+                "total_late_minutes": {"$sum": {"$ifNull": ["$late_minutes", 0]}},
+                "late_count": {"$sum": {"$cond": [{"$gt": ["$late_minutes", 0]}, 1, 0]}},
+            }
+        },
+        {"$match": {"total_late_minutes": {"$gt": 0}}},
+        {"$sort": {"total_late_minutes": -1, "_id": 1}},
+        {
+            "$setWindowFields": {
+                "sortBy": {"total_late_minutes": -1},
+                "output": {"rank": {"$rank": {}}},
+            }
+        },
+        {"$match": {"rank": {"$lte": limit}}},
+        {"$sort": {"total_late_minutes": -1, "_id": 1}},
+    ]
+    rows = list(db.attendance_logs.aggregate(pipe))
+    return {
+        "month": month,
+        "items": [
+            {
+                "rank": r["rank"],
+                "emp_code": r["_id"],
+                "name": r["name"],
+                "department": r["dept"],
+                "total_late_minutes": int(r["total_late_minutes"]),
+                "late_count": int(r["late_count"]),
+            }
+            for r in rows
+        ],
+    }
