@@ -271,30 +271,39 @@ export default function App() {
     <Router>
       <div className="min-h-screen">
         <a href="#main" className="sr-only focus:not-sr-only focus:absolute focus:m-2 focus:rounded focus:bg-white focus:p-2">Skip to content</a>
-        <div className="mx-auto flex max-w-6xl flex-col gap-6 p-4 md:flex-row md:p-6">
-          <nav aria-label="Primary" className="shrink-0 md:w-52">
-            <div className="mb-4 flex items-center gap-2">
-              <svg width="24" height="24" viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M4 5v14M9 5v14M14 5v14M4 15l16-6" stroke="#0f766e" strokeWidth="2.4" strokeLinecap="round" fill="none" />
-              </svg>
-              <span className="text-lg font-semibold tracking-tight">Muster</span>
-              <span className="rounded-md bg-slate-200 px-1.5 py-0.5 text-[11px] font-medium text-slate-600">Demo</span>
+        <div className="mx-auto flex min-h-screen max-w-7xl flex-col gap-0 md:flex-row">
+          <nav aria-label="Primary" className="shrink-0 bg-side px-4 py-5 text-white md:sticky md:top-0 md:h-screen md:w-60">
+            <div className="mb-6 flex items-center gap-2.5 px-1">
+              <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-brand">
+                <svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M4 5v14M9 5v14M14 5v14M4 15l16-6" stroke="#fff" strokeWidth="2.4" strokeLinecap="round" fill="none" />
+                </svg>
+              </span>
+              <span>
+                <span className="block text-[17px] font-semibold leading-5 tracking-tight">Muster</span>
+                <span className="block text-[11px] font-medium uppercase tracking-widest text-slate-400">Attendance demo</span>
+              </span>
             </div>
+            <p className="mb-1.5 px-3 text-[11px] font-semibold uppercase tracking-widest text-slate-500">Operate</p>
             <ul className="flex gap-1 md:flex-col">
               {NAV.map((n) => (
                 <li key={n.to}>
                   <NavLink to={n.to} end={n.end}
-                    className={({ isActive }) => `block rounded-lg px-3 py-2 text-sm font-medium transition-colors ${isActive ? "bg-brand text-white" : "text-slate-600 hover:bg-white hover:text-ink"}`}>
+                    className={({ isActive }) => `block rounded-xl px-3 py-2 text-sm font-medium transition-all ${isActive ? "bg-brand text-white shadow" : "text-slate-300 hover:bg-side-2 hover:text-white"}`}>
                     {n.label}
                   </NavLink>
                 </li>
               ))}
             </ul>
-            <p className="mt-4 hidden rounded-lg border border-line bg-white px-3 py-2 text-xs leading-relaxed text-slate-500 md:block">
-              API: same-origin /api → :8000. Every figure is a server response.
+            <div className="mt-6 hidden rounded-xl bg-side-2 p-3 md:block">
+              <p className="flex items-center gap-1.5 text-xs font-semibold text-emerald-300"><span className="inline-block h-2 w-2 rounded-full bg-emerald-400" /> API live</p>
+              <p className="mt-1 font-mono text-[11px] leading-relaxed text-slate-400">same-origin /api<br />→ 127.0.0.1:8000</p>
+            </div>
+            <p className="mt-3 hidden px-1 text-[11px] leading-relaxed text-slate-500 md:block">
+              Every figure is a server response. Nothing here is mocked.
             </p>
           </nav>
-          <main id="main" className="min-w-0 flex-1">
+          <main id="main" className="min-w-0 flex-1 p-4 md:p-8">
             <Routes>
               <Route path="/" element={<OverviewPage />} />
               <Route path="/attendance" element={<RecordsPage />} />

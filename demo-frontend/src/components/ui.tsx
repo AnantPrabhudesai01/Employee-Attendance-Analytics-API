@@ -3,15 +3,15 @@ import type { ReactNode } from "react";
 /* ---------- primitives: one look everywhere ---------- */
 
 export function Card({ children, className = "" }: { children: ReactNode; className?: string }) {
-  return <div className={`rounded-xl border border-line bg-white ${className}`}>{children}</div>;
+  return <div className={`rounded-2xl border border-line bg-white shadow-card ${className}`}>{children}</div>;
 }
 
 export function PageHeader({ title, desc, action }: { title: string; desc?: string; action?: ReactNode }) {
   return (
-    <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
+    <div className="mb-5 flex flex-wrap items-end justify-between gap-3">
       <div>
-        <h1 className="text-2xl font-semibold tracking-tight">{title}</h1>
-        {desc && <p className="mt-0.5 text-sm text-slate-500">{desc}</p>}
+        <h1 className="text-[26px] font-semibold leading-8 tracking-tight">{title}</h1>
+        {desc && <p className="mt-1 text-[13px] text-slate-500">{desc}</p>}
       </div>
       {action}
     </div>
@@ -22,7 +22,7 @@ export function PrimaryButton(props: React.ButtonHTMLAttributes<HTMLButtonElemen
   return (
     <button
       {...props}
-      className={`rounded-lg bg-brand px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-brand-700 disabled:cursor-not-allowed disabled:opacity-50 ${props.className ?? ""}`}
+      className={`rounded-xl bg-brand px-4 py-2 text-sm font-semibold text-white shadow-sm transition-all hover:bg-brand-700 hover:shadow active:translate-y-px disabled:cursor-not-allowed disabled:opacity-50 ${props.className ?? ""}`}
     />
   );
 }
@@ -31,7 +31,7 @@ export function GhostButton(props: React.ButtonHTMLAttributes<HTMLButtonElement>
   return (
     <button
       {...props}
-      className={`rounded-lg border border-line bg-white px-3 py-2 text-sm transition-colors hover:bg-slate-50 disabled:opacity-50 ${props.className ?? ""}`}
+      className={`rounded-xl border border-line bg-white px-3 py-2 text-sm font-medium shadow-sm transition-colors hover:bg-slate-50 disabled:opacity-50 ${props.className ?? ""}`}
     />
   );
 }
@@ -109,14 +109,14 @@ export function EmptyPanel({ text }: { text: string }) {
 export function Metric({ label, value, context, to }: { label: string; value: string; context?: string; to?: string }) {
   const body = (
     <>
-      <p className="text-sm text-slate-500">{label}</p>
-      <p className="mt-1 text-[28px] font-semibold leading-9 tracking-tight">{value}</p>
-      {context && <p className="mt-1 text-xs text-slate-500">{context}</p>}
+      <p className="text-[13px] font-medium text-slate-500">{label}</p>
+      <p className="mt-1 text-[32px] font-semibold leading-9 tracking-tight">{value}</p>
+      {context && <p className="mt-1.5 border-t border-line pt-1.5 text-xs leading-relaxed text-slate-500">{context}</p>}
     </>
   );
   return (
-    <div className="rounded-xl border border-line bg-white p-4">
-      {to ? <a href={to} className="block hover:opacity-80">{body}</a> : body}
+    <div className="rounded-2xl border border-line bg-white p-4 shadow-card">
+      {to ? <a href={to} className="block transition-opacity hover:opacity-75">{body}</a> : body}
     </div>
   );
 }

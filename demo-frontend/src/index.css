@@ -2,14 +2,18 @@
 
 @theme {
   --color-ink: #16233a;
-  --color-paper: #f7f8fa;
-  --color-brand: #0f766e;
-  --color-brand-700: #115e59;
+  --color-side: #0d1728;
+  --color-side-2: #13233c;
+  --color-paper: #f4f6f9;
+  --color-brand: #0d9488;
+  --color-brand-700: #0f766e;
+  --color-brand-ink: #99f6e4;
   --color-line: #e3e7ee;
   --color-ok: #1f7a4d;
   --color-warn: #b7791f;
   --color-bad: #c0392b;
   --font-sans: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --shadow-card: 0 1px 2px rgba(16, 24, 58, 0.06), 0 4px 14px -4px rgba(16, 24, 58, 0.1);
 }
 
 body {
@@ -17,6 +21,7 @@ body {
   color: var(--color-ink);
   font-family: var(--font-sans);
   font-variant-numeric: tabular-nums;
+  -webkit-font-smoothing: antialiased;
 }
 
 :focus-visible {
